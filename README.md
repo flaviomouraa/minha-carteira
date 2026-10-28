@@ -38,6 +38,28 @@ e cola em **Ajustes → Cotações automáticas**. Depois, basta clicar em **Atu
 Se algum indicador não vier pela API (LPA, VPA, dividendos), ele pode ser informado à mão em
 **Editar indicadores**. Esses números estão em sites como Status Invest ou Investidor10.
 
+## Aba Mercado
+
+Mostra as ações, FIIs e ETFs mais negociados da B3, com preço, variação do dia, volume, posição no
+intervalo de 52 semanas, indicadores (P/L, P/VP, dividend yield) e o sinal de cada um. Dá para ordenar por
+mais negociados, maiores altas, maiores baixas ou oportunidades.
+
+Clicando num ativo (ali ou em qualquer ticker da carteira), abre o detalhe com o **gráfico de preço**
+(1 mês, 3 meses, 6 meses ou 1 ano) e as linhas do preço-teto e do seu preço médio.
+O plano gratuito da brapi costuma liberar até 3 meses de histórico.
+
+As cotações do Mercado são guardadas por 30 minutos para economizar o limite de consultas do token.
+
+## Sugestões no Radar
+
+A aba Radar sugere ativos que **ainda não estão na sua carteira**, pensando no que falta nela:
+- tipos de investimento abaixo da meta;
+- setores (ações) e segmentos (FIIs) que você ainda não tem, com prioridade para setores perenes;
+- exposições que faltam (exterior, small caps, dividendos) no caso dos ETFs;
+- preço: ativos com sinal de oportunidade sobem na lista e os com "Esperar" ou "Atenção" saem dela.
+
+São ideias para pesquisar, não recomendações de compra.
+
 ## Como os sinais são calculados
 
 - **Ações:** preço-teto = média entre o preço justo de Graham `√(22,5 × LPA × VPA)` e o preço-teto de

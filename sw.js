@@ -1,5 +1,5 @@
 // Cache do "esqueleto" do app para funcionar offline. Cotações sempre vão para a rede.
-const CACHE = 'carteira-v4';
+const CACHE = 'carteira-v5';
 const SHELL = ['./', './index.html', './styles.css', './app.js', './manifest.webmanifest', './icon.svg'];
 
 self.addEventListener('install', e => {

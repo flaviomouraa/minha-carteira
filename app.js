@@ -352,6 +352,8 @@ function planAporte(amount) {
 /* =========================================================================
    Cotações (brapi.dev — plano gratuito com token)
    ========================================================================= */
+// nível de detalhe que o plano do token aceita (0 = completo, 2 = só preço); evita requisições que sempre falham
+let quoteLevel = (() => { try { return Number(localStorage.getItem('minha-carteira.apiLevel')) || 0; } catch { return 0; } })();
 async function fetchQuote(ticker, token) {
   const base = `https://brapi.dev/api/quote/${encodeURIComponent(ticker)}`;
   const tk = token ? `&token=${encodeURIComponent(token)}` : '';
@@ -361,13 +363,14 @@ async function fetchQuote(ticker, token) {
     `${base}?${tk.slice(1)}`,
   ];
   let lastErr;
-  for (const url of tries) {
+  for (let i = quoteLevel; i < tries.length; i++) {
     try {
-      const r = await fetch(url);
+      const r = await fetch(tries[i]);
       if (!r.ok) { lastErr = new Error(`HTTP ${r.status}`); if (r.status === 404) break; continue; }
       const j = await r.json();
       const q = j.results?.[0];
       if (!q || q.regularMarketPrice == null) { lastErr = new Error('sem resultado'); continue; }
+      if (i > quoteLevel) { quoteLevel = i; try { localStorage.setItem('minha-carteira.apiLevel', i); } catch {} }
       return parseQuote(q);
     } catch (e) { lastErr = e; }
   }
@@ -384,6 +387,8 @@ function parseQuote(q) {
     vpa: ks.bookValue ?? null,
     name: q.longName || q.shortName || null,
     logo: q.logourl || null,
+    volume: q.regularMarketVolume ?? null,
+    marketCap: q.marketCap ?? null,
     updatedAt: new Date().toISOString(),
   };
   const divs = q.dividendsData?.cashDividends;
@@ -557,10 +562,11 @@ const alertIcon = { good: ICON.check, warn: ICON.warn, bad: ICON.warn, info: ICO
 function render() {
   $$('#tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === ui.tab));
   const v = $('#view');
-  if (!state.assets.length && !state.onboarded && ui.tab !== 'config') { v.innerHTML = viewWelcome(); return; }
-  v.innerHTML = ({ painel: viewPainel, carteira: viewCarteira, sinais: viewSinais, aportar: viewAportar, radar: viewRadar, config: viewConfig })[ui.tab]();
+  if (!state.assets.length && !state.onboarded && ui.tab !== 'config' && ui.tab !== 'mercado') { v.innerHTML = viewWelcome(); return; }
+  v.innerHTML = ({ painel: viewPainel, carteira: viewCarteira, mercado: viewMercado, sinais: viewSinais, aportar: viewAportar, radar: viewRadar, config: viewConfig })[ui.tab]();
   if (ui.tab === 'aportar') bindAporte();
   if (ui.tab === 'config') bindConfig();
+  if (ui.tab === 'mercado' || ui.tab === 'radar') maybeRefreshMarket();
 }
 
 function viewWelcome() {
@@ -696,12 +702,12 @@ function viewCarteira() {
       <div class="seg" role="group" aria-label="Ordenar">${[['value', 'Valor'], ['gain', 'Rentabilidade'], ['cls', 'Classe'], ['name', 'Nome']].map(([k, l]) => `<button data-sort="${k}" class="${ui.sortBy === k ? 'active' : ''}">${l}</button>`).join('')}</div>
     </div>
     <div class="table-wrap"><table>
-      <thead><tr><th>Ativo</th><th>Classe</th><th class="r">Qtd.</th><th class="r">Preço médio</th><th class="r">Preço atual</th><th class="r">Dia</th><th class="r">Valor</th><th class="r">Resultado</th><th class="r">% carteira</th><th>Sinal</th><th></th></tr></thead>
+      <thead><tr><th>Ativo</th><th>Classe</th><th class="r">Qtd.</th><th class="r">Preço médio</th><th class="r">Preço atual</th><th class="r">Dia</th><th class="r">Valor</th><th class="r">Resultado</th><th class="r">% carteira</th><th>Sinal</th><th class="hide-xs"></th></tr></thead>
       <tbody>${rows.map(a => {
         const v = valueOf(a), c = costOf(a), g = v - c, s = analyze(a);
         const isRf = a.cls === 'rf';
         return `<tr>
-          <td><span class="cls-dot" style="background:${CLASSES[a.cls].color}"></span><span class="ticker">${esc(isRf ? a.name : a.ticker)}</span>
+          <td><span class="cls-dot" style="background:${CLASSES[a.cls].color}"></span>${isRf ? `<span class="ticker">${esc(a.name)}</span>` : `<span class="ticker link" data-detail="${esc(a.ticker)}">${esc(a.ticker)}</span>`}
             <div class="muted" style="font-size:.78rem;margin-left:16px">${esc(isRf ? [a.indexer, a.rate, a.maturity && 'venc. ' + new Date(a.maturity + 'T00:00').toLocaleDateString('pt-BR')].filter(Boolean).join(' · ') : (a.sector || a.name || ''))}</div></td>
           <td>${clsLabel(a.cls)}</td>
           <td class="r">${isRf ? '—' : fmtN(a.qty)}</td>
@@ -736,7 +742,7 @@ function signalCard(a, s, inRadar) {
   }
   return `<div class="card signal-card">
     <div class="top">
-      <div style="min-width:0"><div class="row" style="gap:6px"><span class="cls-dot" style="background:${CLASSES[a.cls].color}"></span><span class="ticker">${esc(a.ticker)}</span>${inRadar ? '<span class="badge b-new">fora da carteira</span>' : ''}</div>
+      <div style="min-width:0"><div class="row" style="gap:6px"><span class="cls-dot" style="background:${CLASSES[a.cls].color}"></span><span class="ticker link" data-detail="${esc(a.ticker)}">${esc(a.ticker)}</span>${inRadar ? '<span class="badge b-new">fora da carteira</span>' : ''}</div>
         <div class="name">${esc(a.name || a.sector || clsLabel(a.cls))}</div></div>
       ${badge(s)}
     </div>
@@ -824,11 +830,18 @@ function bindAporte() {
 
 function viewRadar() {
   const items = state.radar.map(a => ({ a, s: analyze(a) })).sort((x, y) => y.s.score - x.s.score);
+  const sg = suggestions();
   return `
   <div class="page-head">
     <div><h1>Radar</h1><p>Ativos que você <b>ainda não tem</b> e quer acompanhar. Quando ficarem baratos, aparecem como oportunidade e entram na sugestão de aporte.</p></div>
     <button class="btn primary" data-act="addRadar">${ICON.plus} Adicionar ao radar</button>
   </div>
+  <div class="section-title" style="margin-top:0"><h2>Sugestões para a sua carteira</h2></div>
+  <p class="muted" style="margin:-6px 0 12px;font-size:.88rem">Escolhidas pelo que falta na sua carteira (metas, setores e segmentos)${market?.quotes ? ' e pelo preço atual de cada ativo' : ''}. São ideias para pesquisar, não recomendações de compra.</p>
+  ${!state.settings.token ? `<div class="alert info" style="margin-bottom:12px"><div class="ic">${ICON.info}</div><div><h3>Cadastre o token de cotações para sugestões melhores</h3><p>Sem cotações, as sugestões consideram só a diversificação. Com o token, entram também preço-teto, quedas e oportunidades. <a href="#" data-tab-go="config">Ir para Ajustes</a></p></div></div>` : ''}
+  ${sg.rfMissing || sg.rfGap ? `<div class="alert warn" style="margin-bottom:12px"><div class="ic">${ICON.warn}</div><div><h3>${sg.rfMissing ? 'Você ainda não tem renda fixa' : `Renda fixa está ${pct(sg.rfGap)} abaixo da meta`}</h3><p>Para reserva e estabilidade: Tesouro Selic ou CDB com liquidez diária. Para o longo prazo: Tesouro IPCA+.</p></div></div>` : ''}
+  ${sg.list.length ? `<div class="grid g-3">${sg.list.map(suggestionCard).join('')}</div>` : '<div class="card empty">Sua carteira já cobre as classes e os setores da nossa lista de referência. Use a aba Mercado para explorar mais ativos.</div>'}
+  <div class="section-title"><h2>Seu radar <span class="count">${items.length}</span></h2></div>
   ${items.length ? `<div class="grid g-3">${items.map(x => signalCard(x.a, x.s, true)).join('')}</div>` : `<div class="card empty"><h2>Radar vazio</h2><p style="margin:8px 0 16px">Adicione ações, FIIs ou ETFs que você está pesquisando para receber sinais sobre eles.</p><button class="btn primary" data-act="addRadar">${ICON.plus} Adicionar ao radar</button></div>`}`;
 }
 
@@ -884,7 +897,11 @@ function bindConfig() {
   }));
   $$('[data-set]').forEach(i => i.addEventListener('change', () => { const v = parseNum(i.value); if (v != null && v > 0) { state.settings[i.dataset.set] = v / 100; save(); toast('Critério salvo.'); } }));
   $$('[data-setraw]').forEach(i => i.addEventListener('change', () => { const v = parseNum(i.value); if (v != null && v > 0) { state.settings[i.dataset.setraw] = v; save(); toast('Critério salvo.'); } }));
-  $('#saveToken').onclick = () => { state.settings.token = $('#token').value.trim(); save(); toast('Token salvo.'); };
+  $('#saveToken').onclick = () => {
+    state.settings.token = $('#token').value.trim(); save();
+    quoteLevel = 0; try { localStorage.removeItem('minha-carteira.apiLevel'); } catch {}
+    market = null; toast('Token salvo.');
+  };
   $('#resetCrit').onclick = () => { const tk = state.settings.token; state.settings = { ...DEFAULT_SETTINGS, token: tk }; save(); render(); toast('Critérios restaurados.'); };
 }
 
@@ -898,10 +915,10 @@ function openModal(html, onMount) {
   onMount?.(m);
   setTimeout(() => m.querySelector('input, select')?.focus(), 30);
 }
-function closeModal() { $('#modal').hidden = true; $('#modal').innerHTML = ''; }
+function closeModal() { $('#modal').hidden = true; $('#modal').innerHTML = ''; ui.detail = null; }
 
-function assetForm(existing, { radar = false } = {}) {
-  const a = existing || { cls: 'acao', manual: {} };
+function assetForm(existing, { radar = false, prefill = null } = {}) {
+  const a = existing || prefill || { cls: 'acao', manual: {} };
   const title = existing ? `Editar ${esc(a.ticker || a.name)}` : radar ? 'Adicionar ao radar' : 'Adicionar ativo';
   openModal(`
     <h2>${title}</h2>
@@ -948,7 +965,7 @@ function assetForm(existing, { radar = false } = {}) {
     $('#saveAsset', m).onclick = () => {
       const g = n => f[n]?.value?.trim?.() ?? '';
       const cls = g('cls');
-      const obj = existing || { id: uid(), manual: {}, mkt: {} };
+      const obj = existing || { id: uid(), manual: {}, mkt: { ...prefill?.mkt } };
       obj.cls = cls;
       if (cls === 'rf') {
         obj.name = g('name'); obj.invested = parseNum(g('invested')); obj.current = parseNum(g('current')) ?? obj.invested;
@@ -1401,6 +1418,429 @@ document.addEventListener('visibilitychange', () => {
 });
 
 /* =========================================================================
+   Mercado: ativos mais negociados da B3 + base para as sugestões do Radar
+   ========================================================================= */
+// Universo de referência: ativos líquidos e conhecidos, com setor/segmento.
+// Serve de reserva quando a lista "mais negociados" da API não está disponível
+// e de base para as sugestões de diversificação. base = peso inicial na sugestão.
+const UNIVERSE = [
+  // Ações
+  { t: 'PETR4', n: 'Petrobras', cls: 'acao', s: 'Petróleo e gás' },
+  { t: 'PRIO3', n: 'PRIO', cls: 'acao', s: 'Petróleo e gás' },
+  { t: 'VALE3', n: 'Vale', cls: 'acao', s: 'Mineração' },
+  { t: 'ITUB4', n: 'Itaú Unibanco', cls: 'acao', s: 'Bancos' },
+  { t: 'BBDC4', n: 'Bradesco', cls: 'acao', s: 'Bancos' },
+  { t: 'BBAS3', n: 'Banco do Brasil', cls: 'acao', s: 'Bancos' },
+  { t: 'BPAC11', n: 'BTG Pactual', cls: 'acao', s: 'Bancos' },
+  { t: 'ITSA4', n: 'Itaúsa', cls: 'acao', s: 'Holding' },
+  { t: 'B3SA3', n: 'B3', cls: 'acao', s: 'Serviços financeiros' },
+  { t: 'BBSE3', n: 'BB Seguridade', cls: 'acao', s: 'Seguros' },
+  { t: 'CXSE3', n: 'Caixa Seguridade', cls: 'acao', s: 'Seguros' },
+  { t: 'EQTL3', n: 'Equatorial', cls: 'acao', s: 'Energia elétrica' },
+  { t: 'CMIG4', n: 'Cemig', cls: 'acao', s: 'Energia elétrica' },
+  { t: 'TAEE11', n: 'Taesa', cls: 'acao', s: 'Energia elétrica' },
+  { t: 'SBSP3', n: 'Sabesp', cls: 'acao', s: 'Saneamento' },
+  { t: 'SAPR11', n: 'Sanepar', cls: 'acao', s: 'Saneamento' },
+  { t: 'VIVT3', n: 'Vivo (Telefônica)', cls: 'acao', s: 'Telecomunicações' },
+  { t: 'TIMS3', n: 'TIM', cls: 'acao', s: 'Telecomunicações' },
+  { t: 'WEGE3', n: 'WEG', cls: 'acao', s: 'Indústria' },
+  { t: 'EMBR3', n: 'Embraer', cls: 'acao', s: 'Indústria' },
+  { t: 'ABEV3', n: 'Ambev', cls: 'acao', s: 'Consumo' },
+  { t: 'RADL3', n: 'Raia Drogasil', cls: 'acao', s: 'Saúde' },
+  { t: 'HYPE3', n: 'Hypera', cls: 'acao', s: 'Saúde' },
+  { t: 'SUZB3', n: 'Suzano', cls: 'acao', s: 'Papel e celulose' },
+  { t: 'KLBN11', n: 'Klabin', cls: 'acao', s: 'Papel e celulose' },
+  { t: 'GGBR4', n: 'Gerdau', cls: 'acao', s: 'Siderurgia' },
+  { t: 'RENT3', n: 'Localiza', cls: 'acao', s: 'Logística' },
+  { t: 'LREN3', n: 'Lojas Renner', cls: 'acao', s: 'Varejo' },
+  { t: 'MGLU3', n: 'Magazine Luiza', cls: 'acao', s: 'Varejo' },
+  { t: 'SLCE3', n: 'SLC Agrícola', cls: 'acao', s: 'Agronegócio' },
+  { t: 'TOTS3', n: 'Totvs', cls: 'acao', s: 'Tecnologia' },
+  { t: 'CYRE3', n: 'Cyrela', cls: 'acao', s: 'Construção' },
+  // FIIs
+  { t: 'MXRF11', n: 'Maxi Renda', cls: 'fii', s: 'Recebíveis (papel)' },
+  { t: 'KNCR11', n: 'Kinea Rendimentos', cls: 'fii', s: 'Recebíveis (papel)' },
+  { t: 'CPTS11', n: 'Capitânia Securities', cls: 'fii', s: 'Recebíveis (papel)' },
+  { t: 'IRDM11', n: 'Iridium Recebíveis', cls: 'fii', s: 'Recebíveis (papel)' },
+  { t: 'KNIP11', n: 'Kinea Índices de Preços', cls: 'fii', s: 'Recebíveis (papel)' },
+  { t: 'HGLG11', n: 'Logística (HGLG)', cls: 'fii', s: 'Logística' },
+  { t: 'BTLG11', n: 'BTG Logística', cls: 'fii', s: 'Logística' },
+  { t: 'XPLG11', n: 'XP Log', cls: 'fii', s: 'Logística' },
+  { t: 'VISC11', n: 'Vinci Shopping Centers', cls: 'fii', s: 'Shoppings' },
+  { t: 'XPML11', n: 'XP Malls', cls: 'fii', s: 'Shoppings' },
+  { t: 'HGRU11', n: 'Renda Urbana (HGRU)', cls: 'fii', s: 'Renda urbana' },
+  { t: 'TRXF11', n: 'TRX Real Estate', cls: 'fii', s: 'Renda urbana' },
+  { t: 'KNRI11', n: 'Kinea Renda Imobiliária', cls: 'fii', s: 'Híbrido' },
+  { t: 'PVBI11', n: 'VBI Prime Properties', cls: 'fii', s: 'Lajes corporativas' },
+  { t: 'BRCR11', n: 'BTG Corporate Office', cls: 'fii', s: 'Lajes corporativas' },
+  { t: 'HFOF11', n: 'Hedge Top FOFII', cls: 'fii', s: 'Fundo de fundos' },
+  // ETFs
+  { t: 'BOVA11', n: 'iShares Ibovespa', cls: 'etf', s: 'Ibovespa', base: 1 },
+  { t: 'BOVV11', n: 'It Now Ibovespa', cls: 'etf', s: 'Ibovespa', base: 0.4 },
+  { t: 'IVVB11', n: 'iShares S&P 500', cls: 'etf', s: 'Exterior (EUA)', base: 1 },
+  { t: 'NASD11', n: 'Trend Nasdaq 100', cls: 'etf', s: 'Exterior (EUA)', base: 0.5 },
+  { t: 'SMAL11', n: 'iShares Small Cap', cls: 'etf', s: 'Small caps', base: 0.6 },
+  { t: 'DIVO11', n: 'It Now IDIV (dividendos)', cls: 'etf', s: 'Dividendos', base: 0.8 },
+  { t: 'GOLD11', n: 'Trend Ouro', cls: 'etf', s: 'Ouro', base: 0.5 },
+  { t: 'HASH11', n: 'Hashdex Nasdaq Crypto', cls: 'etf', s: 'Criptoativos', base: 0.2 },
+];
+const UNI = Object.fromEntries(UNIVERSE.map(u => [u.t, u]));
+const MKT_KEY = 'minha-carteira.mercado';
+const MKT_MAX_AGE = 30 * 60 * 1000; // 30 min
+let market = (() => { try { return JSON.parse(localStorage.getItem(MKT_KEY)) || null; } catch { return null; } })();
+let mktLoading = false;
+const saveMarket = () => { try { localStorage.setItem(MKT_KEY, JSON.stringify(market)); } catch {} };
+
+function classifyFund(f) {
+  const n = (f.name || '').toUpperCase();
+  if (UNI[f.ticker]) return UNI[f.ticker].cls;
+  if (/ETF|ISHARES|IT NOW|TREND|INDEX|ÍNDICE|INDICE|HASHDEX/.test(n)) return 'etf';
+  if (/11$/.test(f.ticker)) return 'fii';
+  return null;
+}
+
+async function brapiList(type, limit) {
+  const tk = state.settings.token ? `&token=${encodeURIComponent(state.settings.token)}` : '';
+  const r = await fetch(`https://brapi.dev/api/quote/list?type=${type}&sortBy=volume&sortOrder=desc&limit=${limit}${tk}`);
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  const j = await r.json();
+  return (j.stocks || []).filter(s => s.stock && !/F$/.test(s.stock)).map(s => ({
+    ticker: s.stock.toUpperCase(), name: s.name, sector: s.sector, logo: s.logo,
+    price: s.close, chg: s.change != null ? s.change / 100 : null, volume: s.volume, marketCap: s.market_cap,
+  }));
+}
+
+/** executa fn em lotes paralelos */
+async function pool(items, size, fn) {
+  let i = 0;
+  await Promise.all(Array.from({ length: Math.min(size, items.length) }, async () => { while (i < items.length) await fn(items[i++]); }));
+}
+
+async function refreshMarket() {
+  if (mktLoading) return;
+  if (!state.settings.token) return toast('Cadastre seu token gratuito da brapi.dev em Ajustes para ver o mercado.', 5000);
+  mktLoading = true;
+  const lists = { acao: [], fii: [], etf: [] };
+  const base = {};
+  let source = 'lista';
+  try {
+    const [st, fu] = await Promise.all([brapiList('stock', 25), brapiList('fund', 80)]);
+    st.slice(0, 20).forEach(s => { lists.acao.push(s.ticker); base[s.ticker] = s; });
+    fu.forEach(f => { const c = classifyFund(f); if (c && lists[c].length < 20) { lists[c].push(f.ticker); base[f.ticker] = f; } });
+  } catch { source = 'referência'; }
+  // complementa com a lista de referência quando a API não trouxe o suficiente
+  for (const k of ['acao', 'fii', 'etf']) {
+    if (lists[k].length < 6) { lists[k] = UNIVERSE.filter(u => u.cls === k).map(u => u.t); if (source === 'lista') source = 'mista'; }
+  }
+  const tickers = [...new Set([...lists.acao, ...lists.fii, ...lists.etf, ...UNIVERSE.map(u => u.t)])];
+  const quotes = {};
+  let done = 0, fails = 0;
+  const prog = () => { const el = $('#mktProgress'); if (el) el.textContent = `Buscando cotações… ${done}/${tickers.length}`; };
+  prog();
+  await pool(tickers, 5, async t => {
+    try {
+      const q = await fetchQuote(t, state.settings.token);
+      const b = base[t] || {};
+      quotes[t] = { ...q, name: q.name || b.name || UNI[t]?.n, logo: q.logo || b.logo, volume: q.volume ?? b.volume ?? null, marketCap: q.marketCap ?? b.marketCap ?? null };
+    } catch { fails++; if (base[t]?.price) quotes[t] = { ...base[t] }; }
+    done++; prog();
+  });
+  for (const k of ['acao', 'fii', 'etf']) lists[k] = lists[k].filter(t => quotes[t]?.price);
+  market = { lists, quotes, updatedAt: new Date().toISOString(), source, fails, total: tickers.length };
+  saveMarket();
+  mktLoading = false;
+  // ativos da carteira/radar que estão no mercado ganham a cotação nova
+  [...state.assets, ...state.radar].forEach(a => { const q = quotes[(a.ticker || '').toUpperCase()]; if (q && a.cls !== 'rf') { a.mkt = { ...a.mkt, ...q }; a.price = null; } });
+  persistLocal();
+  if (['mercado', 'radar', 'painel', 'carteira', 'sinais'].includes(ui.tab) && $('#modal').hidden) render();
+  if (!Object.keys(quotes).length) toast('Não foi possível buscar as cotações. Confira seu token em Ajustes.', 6000);
+}
+function maybeRefreshMarket() {
+  if (!state.settings.token || mktLoading) return;
+  if (!market?.updatedAt || Date.now() - new Date(market.updatedAt).getTime() > MKT_MAX_AGE) refreshMarket();
+}
+
+/* ---------- informações de um ticker (mercado, carteira ou referência) ---------- */
+function tickerInfo(t) {
+  t = String(t).toUpperCase();
+  const own = state.assets.find(a => (a.ticker || '').toUpperCase() === t);
+  const rad = state.radar.find(a => (a.ticker || '').toUpperCase() === t);
+  const q = { ...(own || rad)?.mkt, ...market?.quotes?.[t] };
+  const u = UNI[t];
+  const cls = own?.cls || rad?.cls || u?.cls || (/11$/.test(t) ? 'fii' : 'acao');
+  const asset = own || rad || { cls, ticker: t, sector: u?.s, manual: {}, mkt: q };
+  return { t, own, rad, q, u, cls, asset, name: q.name || u?.n || own?.name || '', sector: own?.sector || rad?.sector || u?.s || '' };
+}
+const compactBRL = v => (v == null || isNaN(v) ? '—' : v >= 1e9 ? 'R$ ' + (v / 1e9).toFixed(1).replace('.', ',') + ' bi' : v >= 1e6 ? 'R$ ' + (v / 1e6).toFixed(1).replace('.', ',') + ' mi' : v >= 1e3 ? 'R$ ' + (v / 1e3).toFixed(0) + ' mil' : fmt(v));
+const finVolume = q => (q?.volume && q?.price ? q.volume * q.price : null);
+const logoHtml = (q, t, size = 32) => q?.logo
+  ? `<img class="logo" src="${esc(q.logo)}" alt="" width="${size}" height="${size}" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'logo ph',textContent:'${esc(t.slice(0, 2))}'}))">`
+  : `<span class="logo ph" style="width:${size}px;height:${size}px">${esc(t.slice(0, 2))}</span>`;
+function miniRange(q) {
+  if (!q?.hi52 || !q?.lo52 || q.hi52 <= q.lo52 || !q.price) return '<span class="muted">—</span>';
+  const pos = clamp((q.price - q.lo52) / (q.hi52 - q.lo52), 0, 1) * 100;
+  return `<div class="mini-range" data-tip="${esc(`Mín. 52s ${fmt(q.lo52)} · Atual ${fmt(q.price)} · Máx. 52s ${fmt(q.hi52)}`)}"><span style="left:${pos}%"></span></div>`;
+}
+function keyIndicators(cls, q) {
+  const p = q?.price;
+  if (cls === 'acao') return [['P/L', q?.lpa > 0 && p ? fmtN(p / q.lpa) : '—'], ['DY', q?.dpa && p ? pct(q.dpa / p) : '—']];
+  if (cls === 'fii') return [['P/VP', q?.vpa && p ? fmtN(p / q.vpa) : '—'], ['DY', q?.dpa && p ? pct(q.dpa / p) : '—']];
+  return [['Queda máx.', q?.hi52 && p ? pct((q.hi52 - p) / q.hi52, 0) : '—'], ['', '']];
+}
+
+/* ---------- aba Mercado ---------- */
+function viewMercado() {
+  const cls = ui.mktCls || 'acao', sort = ui.mktSort || 'volume';
+  const head = `<div class="page-head">
+    <div><h1>Mercado</h1><p>Os ativos mais negociados da B3, com preço, variação do dia e principais indicadores.</p></div>
+    <div class="row">${market?.updatedAt ? `<span class="muted" style="font-size:.85rem">Atualizado ${fmtWhen(market.updatedAt)}</span>` : ''}
+      <button class="btn" data-act="refreshMarket" ${mktLoading || !state.settings.token ? 'disabled' : ''}>Atualizar</button></div>
+  </div>`;
+  if (!state.settings.token) {
+    return head + `<div class="card empty"><h2>Conecte as cotações para ver o mercado</h2>
+      <p style="margin:8px auto 16px;max-width:560px">Crie uma conta gratuita em <a href="https://brapi.dev" target="_blank" rel="noopener">brapi.dev</a>, copie seu token e cole em Ajustes. Em seguida, esta aba mostra as ações, FIIs e ETFs mais negociados.</p>
+      <button class="btn primary" data-tab-go="config">Ir para Ajustes</button></div>`;
+  }
+  if (!market?.lists) {
+    return head + `<div class="card empty"><h2 id="mktProgress">${mktLoading ? 'Buscando cotações…' : 'Nenhum dado ainda'}</h2><p class="muted" style="margin-top:6px">Isso leva alguns segundos na primeira vez.</p></div>`;
+  }
+  let rows = (market.lists[cls] || []).map(t => ({ t, q: market.quotes[t], info: tickerInfo(t) }));
+  rows.forEach(r => { r.sig = analyze(r.info.asset); });
+  const sorters = {
+    volume: (a, b) => (finVolume(b.q) || 0) - (finVolume(a.q) || 0),
+    up: (a, b) => (b.q.chg ?? -9) - (a.q.chg ?? -9),
+    down: (a, b) => (a.q.chg ?? 9) - (b.q.chg ?? 9),
+    opp: (a, b) => b.sig.score - a.sig.score,
+  };
+  rows.sort(sorters[sort]);
+  const withChg = rows.filter(r => r.q.chg != null);
+  const ups = withChg.filter(r => r.q.chg > 0).length;
+  const best = [...withChg].sort(sorters.up)[0], worst = [...withChg].sort(sorters.down)[0];
+  const seg = (key, cur, opts) => `<div class="seg" role="group">${opts.map(([k, l]) => `<button data-${key}="${k}" class="${cur === k ? 'active' : ''}">${l}</button>`).join('')}</div>`;
+  const ind = keyIndicators(cls, {});
+  return head + `
+  ${mktLoading ? `<p class="muted" id="mktProgress" style="margin-bottom:10px">Buscando cotações…</p>` : ''}
+  <div class="row" style="justify-content:space-between;margin-bottom:14px">
+    ${seg('mkt-cls', cls, [['acao', 'Ações'], ['fii', 'FIIs'], ['etf', 'ETFs']])}
+    ${seg('mkt-sort', sort, [['volume', 'Mais negociados'], ['up', 'Maiores altas'], ['down', 'Maiores baixas'], ['opp', 'Oportunidades']])}
+  </div>
+  <div class="grid g-3" style="margin-bottom:16px">
+    <div class="card kpi"><div class="label">Subindo hoje</div><div class="value">${ups} de ${withChg.length}</div><div class="sub">${clsLabel(cls)} desta lista</div></div>
+    <div class="card kpi"><div class="label">Maior alta</div><div class="value pos">${best ? signedPct(best.q.chg, 2) : '—'}</div><div class="sub">${best ? esc(best.t) + ' · ' + fmt(best.q.price) : ''}</div></div>
+    <div class="card kpi"><div class="label">Maior queda</div><div class="value neg">${worst && worst.q.chg < 0 ? signedPct(worst.q.chg, 2) : '—'}</div><div class="sub">${worst && worst.q.chg < 0 ? esc(worst.t) + ' · ' + fmt(worst.q.price) : 'nenhuma queda hoje'}</div></div>
+  </div>
+  <div class="card">
+    ${rows.length ? `<div class="table-wrap"><table class="mkt-table">
+      <thead><tr><th class="hide-xs">#</th><th>Ativo</th><th class="r">Preço</th><th class="r">Dia</th><th class="r hide-md">Volume</th><th class="hide-md">52 semanas</th><th class="r hide-md">${ind[0][0]}</th>${ind[1][0] ? `<th class="r hide-md">${ind[1][0]}</th>` : ''}<th>Sinal</th><th></th></tr></thead>
+      <tbody>${rows.map((r, i) => {
+        const k = keyIndicators(cls, r.q);
+        return `<tr class="clickable" data-detail="${esc(r.t)}">
+          <td class="muted num hide-xs">${i + 1}</td>
+          <td><div class="asset-cell">${logoHtml(r.q, r.t)}<div><span class="ticker">${esc(r.t)}</span><div class="muted asset-name">${esc(r.info.name)}</div></div></div></td>
+          <td class="r"><b>${fmt(r.q.price)}</b></td>
+          <td class="r ${r.q.chg > 0 ? 'pos' : r.q.chg < 0 ? 'neg' : ''}">${r.q.chg != null ? signedPct(r.q.chg, 2) : '—'}</td>
+          <td class="r hide-md">${compactBRL(finVolume(r.q))}</td>
+          <td class="hide-md">${miniRange(r.q)}</td>
+          <td class="r hide-md">${k[0][1]}</td>${k[1][0] ? `<td class="r hide-md">${k[1][1]}</td>` : ''}
+          <td>${badge(r.sig)}</td>
+          <td class="r hide-xs">${r.info.own ? '<span class="badge b-hold">Na carteira</span>' : r.info.rad ? '<span class="badge b-new">No radar</span>' : `<button class="btn sm" data-radar-add="${esc(r.t)}">+ Radar</button>`}</td>
+        </tr>`;
+      }).join('')}</tbody></table></div>` : '<div class="empty">Nenhum ativo com cotação nesta lista.</div>'}
+    <p class="muted" style="font-size:.8rem;margin-top:12px">Clique em um ativo para ver o gráfico de preço e todos os indicadores. ${market.source === 'lista' ? 'Ranking por volume financeiro do dia.' : 'Lista de ativos de alta liquidez ordenada pelo volume do dia.'}${market.fails ? ` ${market.fails} ativos não puderam ser atualizados.` : ''}</p>
+  </div>`;
+}
+
+/* ---------- detalhes do ativo + gráfico de preço ---------- */
+const histCache = {};
+async function fetchHistory(t, range) {
+  const key = t + range;
+  if (histCache[key]) return histCache[key];
+  const tk = state.settings.token ? `&token=${encodeURIComponent(state.settings.token)}` : '';
+  const r = await fetch(`https://brapi.dev/api/quote/${encodeURIComponent(t)}?range=${range}&interval=1d${tk}`);
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  const j = await r.json();
+  const h = j.results?.[0]?.historicalDataPrice;
+  if (!Array.isArray(h) || h.length < 2) throw new Error('sem histórico');
+  const pts = h.filter(p => p.close != null && p.date).map(p => ({ t: p.date * 1000, v: p.close })).sort((a, b) => a.t - b.t);
+  if (pts.length < 2) throw new Error('sem histórico');
+  return (histCache[key] = pts);
+}
+
+function lineChart(pts, allRefs = []) {
+  // referências muito longe do preço achatariam a linha: viram texto abaixo do gráfico
+  const pMin = Math.min(...pts.map(p => p.v)), pMax = Math.max(...pts.map(p => p.v));
+  const span = Math.max(pMax - pMin, pMax * 0.05);
+  const fits = r => r.v >= pMin - span * 0.6 && r.v <= pMax + span * 0.6;
+  const refs = allRefs.filter(fits), outside = allRefs.filter(r => !fits(r));
+  const W = Math.round(clamp(innerWidth - 90, 280, 560)), H = 230, padL = 8, padR = 70, padT = 14, padB = 26;
+  const vals = pts.map(p => p.v).concat(refs.map(r => r.v));
+  let min = Math.min(...vals), max = Math.max(...vals);
+  const pad = (max - min) * 0.08 || max * 0.02 || 1; min -= pad; max += pad;
+  const x = i => padL + (i / (pts.length - 1)) * (W - padL - padR);
+  const y = v => padT + ((max - v) / (max - min)) * (H - padT - padB);
+  const d = pts.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(p.v).toFixed(1)}`).join('');
+  const dt = ts => new Date(ts).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+  let s = `<svg class="chart line-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Gráfico de preço">`;
+  for (let k = 0; k <= 3; k++) {
+    const v = min + (max - min) * (k / 3) + (k === 0 ? pad * 0.5 : k === 3 ? -pad * 0.5 : 0);
+    s += `<line x1="${padL}" x2="${W - padR}" y1="${y(v)}" y2="${y(v)}" stroke="var(--grid)"/>`;
+    s += `<text class="axis-label num" x="${W - padR + 8}" y="${y(v) + 4}">${fmt(v)}</text>`;
+  }
+  refs.forEach(r => {
+    s += `<line x1="${padL}" x2="${W - padR}" y1="${y(r.v)}" y2="${y(r.v)}" stroke="var(--ink-2)" stroke-width="1.5" stroke-dasharray="5 4"/>`;
+    s += `<text class="axis-label" x="${padL + 4}" y="${y(r.v) - 5}" fill="var(--ink-2)">${esc(r.label)} ${fmt(r.v)}</text>`;
+  });
+  s += `<path d="${d}L${x(pts.length - 1)},${H - padB}L${padL},${H - padB}Z" fill="var(--s1)" opacity=".08"/>`;
+  s += `<path d="${d}" fill="none" stroke="var(--s1)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+  [0, Math.floor((pts.length - 1) / 2), pts.length - 1].forEach((i, k) => {
+    s += `<text class="axis-label" x="${x(i)}" y="${H - 6}" text-anchor="${k === 0 ? 'start' : k === 2 ? 'end' : 'middle'}">${dt(pts[i].t)}</text>`;
+  });
+  s += `<line class="xh" x1="0" x2="0" y1="${padT}" y2="${H - padB}" stroke="var(--ink-2)" stroke-width="1" visibility="hidden"/>`;
+  s += `<circle class="xd" r="5" fill="var(--s1)" stroke="var(--surface)" stroke-width="2" visibility="hidden"/>`;
+  s += `<rect class="hit" x="${padL}" y="0" width="${W - padL - padR}" height="${H - padB}" fill="transparent" data-tip=""/>`;
+  s += '</svg>';
+  if (outside.length) s += `<p class="muted" style="font-size:.8rem;margin-top:4px">${outside.map(r => `${esc(r.label)}: <b class="ink2">${fmt(r.v)}</b> (${r.v > pMax ? 'acima' : 'abaixo'} do período)`).join(' · ')}</p>`;
+  return { html: s, bind(svg) {
+    const hit = svg.querySelector('.hit'), xh = svg.querySelector('.xh'), xd = svg.querySelector('.xd');
+    const first = pts[0].v;
+    const move = e => {
+      const r = svg.getBoundingClientRect();
+      const px = (e.clientX - r.left) * (W / r.width);
+      const i = clamp(Math.round(((px - padL) / (W - padL - padR)) * (pts.length - 1)), 0, pts.length - 1);
+      const p = pts[i];
+      xh.setAttribute('x1', x(i)); xh.setAttribute('x2', x(i)); xh.setAttribute('visibility', 'visible');
+      xd.setAttribute('cx', x(i)); xd.setAttribute('cy', y(p.v)); xd.setAttribute('visibility', 'visible');
+      hit.dataset.tip = `<b>${new Date(p.t).toLocaleDateString('pt-BR')}</b><br>${fmt(p.v)} · ${signedPct(p.v / first - 1)} no período`;
+    };
+    hit.addEventListener('pointermove', move);
+    hit.addEventListener('pointerdown', move);
+    hit.addEventListener('pointerleave', () => { xh.setAttribute('visibility', 'hidden'); xd.setAttribute('visibility', 'hidden'); });
+  } };
+}
+
+const RANGES = [['1mo', '1M'], ['3mo', '3M'], ['6mo', '6M'], ['1y', '1A']];
+function openDetail(t) {
+  const I = tickerInfo(t);
+  const q = I.q, p = q.price, sig = analyze(I.asset);
+  const m = [];
+  m.push(['Volume do dia', compactBRL(finVolume(q))]);
+  m.push(['Máx. 52 semanas', fmt(q.hi52)], ['Mín. 52 semanas', fmt(q.lo52)]);
+  const ind = I.asset.manual || {};
+  const lpa = ind.lpa ?? q.lpa, vpa = ind.vpa ?? q.vpa, dpa = ind.dpa ?? q.dpa;
+  if (I.cls === 'acao') m.push(['P/L', lpa > 0 && p ? fmtN(p / lpa) : '—'], ['P/VP', vpa && p ? fmtN(p / vpa) : '—'], ['Dividend yield 12m', dpa && p ? pct(dpa / p) : '—'], ['LPA', lpa != null ? fmt(lpa) : '—'], ['VPA', vpa != null ? fmt(vpa) : '—'], ['Valor de mercado', compactBRL(q.marketCap)]);
+  else if (I.cls === 'fii') m.push(['P/VP', vpa && p ? fmtN(p / vpa) : '—'], ['Dividend yield 12m', dpa && p ? pct(dpa / p) : '—'], ['Renda por cota/mês', dpa ? fmt(dpa / 12) : '—']);
+  else m.push(['Distância da máxima', q.hi52 && p ? pct((q.hi52 - p) / q.hi52, 0) : '—']);
+  const refs = [];
+  if (sig.teto) refs.push({ v: sig.teto, label: I.cls === 'fii' ? 'Preço p/ desconto' : 'Preço-teto' });
+  if (I.own?.avg) refs.push({ v: I.own.avg, label: 'Seu preço médio' });
+
+  openModal(`
+    <div class="detail-head">
+      ${logoHtml(q, I.t, 44)}
+      <div style="min-width:0;flex:1"><div class="row" style="gap:8px"><h2 style="margin:0">${esc(I.t)}</h2>${badge(sig)}</div>
+        <div class="muted" style="font-size:.88rem">${esc(I.name)}${I.sector ? ' · ' + esc(I.sector) : ''} · ${clsLabel(I.cls)}</div></div>
+      <button class="btn ghost icon" data-close aria-label="Fechar">✕</button>
+    </div>
+    <div class="row" style="align-items:baseline;margin:14px 0 4px"><span style="font-size:1.8rem;font-weight:750">${fmt(p)}</span>
+      ${q.chg != null ? `<span class="${q.chg >= 0 ? 'pos' : 'neg'}" style="font-weight:600">${signedPct(q.chg, 2)} hoje</span>` : ''}</div>
+    <div class="row" style="justify-content:space-between;margin-top:10px"><h3>Histórico de preço</h3>
+      <div class="seg" role="group" id="rangeSeg">${RANGES.map(([k, l]) => `<button data-range="${k}" class="${k === '3mo' ? 'active' : ''}">${l}</button>`).join('')}</div></div>
+    <div id="histBox" class="hist-box"><p class="muted">Carregando gráfico…</p></div>
+    <div class="detail-metrics">${m.map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join('')}</div>
+    ${sig.reasons.length ? `<ul class="detail-reasons">${sig.reasons.slice(0, 3).map(r => `<li>${esc(r)}</li>`).join('')}</ul>` : ''}
+    <div class="modal-foot">
+      ${I.own ? `<button class="btn primary" data-buy="${I.own.id}">Registrar compra</button>`
+        : `${I.rad ? '<span class="badge b-new" style="align-self:center">No seu radar</span>' : `<button class="btn" data-radar-add="${esc(I.t)}">+ Adicionar ao Radar</button>`}
+           <button class="btn primary" data-addwallet="${esc(I.t)}">Adicionar à carteira</button>`}
+    </div>`, () => { ui.detail = { t: I.t, refs }; loadHist('3mo'); });
+}
+async function loadHist(range) {
+  const box = $('#histBox'); if (!box || !ui.detail) return;
+  const { t, refs } = ui.detail;
+  $$('#rangeSeg button').forEach(b => b.classList.toggle('active', b.dataset.range === range));
+  if (!state.settings.token) { box.innerHTML = '<p class="muted">Cadastre seu token da brapi.dev em Ajustes para ver o gráfico.</p>'; return; }
+  box.innerHTML = '<p class="muted">Carregando gráfico…</p>';
+  try {
+    const pts = await fetchHistory(t, range);
+    if (ui.detail?.t !== t || !$('#histBox')) return;
+    const c = lineChart(pts, refs);
+    box.innerHTML = c.html;
+    c.bind(box.querySelector('svg'));
+  } catch {
+    box.innerHTML = `<p class="muted">Histórico de ${RANGES.find(r => r[0] === range)[1]} indisponível${range === '6mo' || range === '1y' ? ' — o plano gratuito da brapi costuma liberar só até 3 meses' : ''}.</p>`;
+  }
+}
+function addToRadar(t) {
+  const I = tickerInfo(t);
+  if (I.own || I.rad) return;
+  state.radar.push({ id: uid(), cls: I.cls, ticker: I.t, sector: I.sector, name: I.name, manual: {}, mkt: { ...I.q } });
+  state.onboarded = true;
+  save();
+  toast(`${I.t} adicionado ao Radar.`);
+}
+
+/* ---------- sugestões para o Radar, a partir da carteira ---------- */
+function suggestions(max = 6) {
+  const P = portfolio();
+  const tSum = CLASS_KEYS.reduce((s, k) => s + (Number(state.targets[k]) || 0), 0) || 1;
+  const target = k => (Number(state.targets[k]) || 0) / tSum;
+  const gap = k => target(k) - (P.total ? P.byClass[k] / P.total : 0);
+  const have = new Set([...state.assets, ...state.radar].map(a => (a.ticker || '').toUpperCase()));
+  const secOwned = k => new Set(state.assets.filter(a => a.cls === k).map(a => a.sector).filter(Boolean));
+  const owned = { acao: secOwned('acao'), fii: secOwned('fii'), etf: new Set(state.assets.filter(a => a.cls === 'etf').map(a => UNI[(a.ticker || '').toUpperCase()]?.s || a.sector).filter(Boolean)) };
+  const cands = UNIVERSE.filter(u => !have.has(u.t) && target(u.cls) > 0).map(u => {
+    const q = market?.quotes?.[u.t];
+    const reasons = [];
+    let score = u.base ?? 0.5;
+    const g = gap(u.cls);
+    if (!P.byClass[u.cls]) { score += 2.5; reasons.push(`Você ainda não tem ${CLASSES[u.cls].label.toLowerCase()}; sua meta é ${pct(target(u.cls), 0)} da carteira.`); }
+    else if (g > 0.03) { score += 1.5 + g * 5; reasons.push(`${CLASSES[u.cls].label} está ${pct(g)} abaixo da sua meta.`); }
+    else if (g < -0.05) score -= 1.5;
+    if (!owned[u.cls].has(u.s)) {
+      if (u.cls === 'acao') {
+        const perene = SETORES_PERENES.includes(u.s);
+        score += perene ? 1.5 : 0.7;
+        reasons.push(perene ? `${u.s} é um setor perene que falta na sua carteira.` : `Diversifica: você não tem empresas de ${u.s}.`);
+      } else if (u.cls === 'fii') { score += 1.2; reasons.push(`Você não tem FIIs de ${u.s.toLowerCase()}.`); }
+      else { score += 0.8; reasons.push(`Exposição a ${u.s}, que sua carteira ainda não tem.`); }
+    } else score -= 0.8;
+    let sig = null;
+    if (q?.price) {
+      sig = analyze({ cls: u.cls, ticker: u.t, manual: {}, mkt: q });
+      if (sig.kind === 'buy') { score += 2; reasons.push(sig.reasons[0]); }
+      else if (sig.kind === 'wait' || sig.kind === 'risk') score -= 3;
+    }
+    if (market?.lists?.[u.cls]?.slice(0, 10).includes(u.t)) { score += 0.3; reasons.push('Está entre os mais negociados da bolsa (boa liquidez).'); }
+    return { u, q, sig, score, reasons };
+  }).filter(c => c.reasons.length && c.score > 0.6).sort((a, b) => b.score - a.score);
+  // variedade: 1 por setor e até 2 por classe; se sobrar espaço, até 3 por classe
+  const out = [], perSec = {}, perCls = {};
+  for (const cap of [2, 3]) {
+    for (const c of cands) {
+      if (out.length >= max) break;
+      const sk = c.u.cls + c.u.s;
+      if (out.includes(c) || perSec[sk] || (perCls[c.u.cls] || 0) >= cap) continue;
+      perSec[sk] = 1; perCls[c.u.cls] = (perCls[c.u.cls] || 0) + 1;
+      out.push(c);
+    }
+  }
+  return { list: out, rfGap: gap('rf') > 0.03 ? gap('rf') : 0, rfMissing: target('rf') > 0 && !P.byClass.rf };
+}
+function suggestionCard(c) {
+  const { u, q, sig } = c;
+  return `<div class="card signal-card sugg">
+    <div class="top">
+      <div style="min-width:0"><div class="row" style="gap:6px"><span class="cls-dot" style="background:${CLASSES[u.cls].color}"></span><span class="ticker link" data-detail="${u.t}">${u.t}</span></div>
+        <div class="name">${clsLabel(u.cls)} · ${esc(u.s)} · ${esc(q?.name || u.n)}</div></div>
+      ${sig ? badge(sig) : ''}
+    </div>
+    ${q?.price ? `<div><span style="font-size:1.2rem;font-weight:700">${fmt(q.price)}</span> ${q.chg != null ? `<span class="${q.chg >= 0 ? 'pos' : 'neg'}" style="font-size:.85rem">${signedPct(q.chg, 2)}</span>` : ''}</div>` : ''}
+    <ul>${c.reasons.slice(0, 3).map(r => `<li>${esc(r)}</li>`).join('')}</ul>
+    <div class="row"><button class="btn sm primary" data-radar-add="${u.t}">+ Adicionar ao Radar</button><button class="btn sm ghost" data-detail="${u.t}">Ver detalhes</button></div>
+  </div>`;
+}
+
+/* =========================================================================
    Tooltip, toast, eventos
    ========================================================================= */
 const tip = $('#tooltip');
@@ -1425,6 +1865,16 @@ function toast(msg, ms = 3000) {
 const findAny = id => state.assets.find(a => a.id === id) || state.radar.find(a => a.id === id);
 
 document.addEventListener('click', e => {
+  const radd = e.target.closest('[data-radar-add]');
+  if (radd) { const t = radd.dataset.radarAdd; addToRadar(t); render(); if (!$('#modal').hidden && ui.detail?.t === t) openDetail(t); return; }
+  const addw = e.target.closest('[data-addwallet]');
+  if (addw) { const I = tickerInfo(addw.dataset.addwallet); closeModal(); return assetForm(null, { prefill: { cls: I.cls, ticker: I.t, sector: I.sector, name: I.name, manual: {}, mkt: { ...I.q } } }); }
+  const rng = e.target.closest('[data-range]');
+  if (rng) return loadHist(rng.dataset.range);
+  const mc = e.target.closest('[data-mkt-cls], [data-mkt-sort]');
+  if (mc) { if (mc.dataset.mktCls) ui.mktCls = mc.dataset.mktCls; if (mc.dataset.mktSort) ui.mktSort = mc.dataset.mktSort; render(); return; }
+  const det = e.target.closest('[data-detail]');
+  if (det && !e.target.closest('button:not([data-detail])')) { e.preventDefault(); return openDetail(det.dataset.detail); }
   const el = e.target.closest('button, [data-act]');
   if (!el) { if (e.target.id === 'modal') closeModal(); return; }
   const d = el.dataset;
@@ -1447,6 +1897,7 @@ document.addEventListener('click', e => {
     case 'import': return importCsv();
     case 'demo': return loadDemo();
     case 'refresh': return refreshQuotes();
+    case 'refreshMarket': return refreshMarket();
     case 'template': return download('modelo-carteira.csv', '﻿' + CSV_TEMPLATE, 'text/csv');
     case 'exportCsv': return exportCsv();
     case 'export': return download(`backup-carteira-${new Date().toISOString().slice(0, 10)}.json`, serialize(), 'application/json');
