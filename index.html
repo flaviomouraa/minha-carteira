@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Minha Carteira</title>
+  <meta name="description" content="Organize e analise seus investimentos: ações, FIIs, ETFs e renda fixa.">
+  <meta name="theme-color" content="#065f46">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon.svg">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <img src="icon.svg" alt="" width="28" height="28">
+      <span>Minha Carteira</span>
+    </div>
+    <nav class="tabs" id="tabs" aria-label="Seções">
+      <button data-tab="painel" class="active">Painel</button>
+      <button data-tab="carteira">Carteira</button>
+      <button data-tab="sinais">Sinais</button>
+      <button data-tab="aportar">Onde aportar</button>
+      <button data-tab="radar">Radar</button>
+      <button data-tab="config">Ajustes</button>
+    </nav>
+    <div class="top-actions">
+      <button class="btn ghost file-chip" id="fileChip" hidden></button>
+      <button class="btn ghost" id="btnRefresh" title="Atualizar cotações">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span class="hide-sm">Atualizar cotações</span>
+      </button>
+      <button class="btn ghost icon" id="btnTheme" title="Alternar tema claro/escuro" aria-label="Alternar tema">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main id="view"></main>
+
+  <footer class="disclaimer">
+    Ferramenta educacional de organização e análise. Os sinais são calculados por critérios objetivos e ajustáveis
+    (Graham, Bazin, P/VP, máxima de 52 semanas) e <strong>não constituem recomendação de investimento</strong>.
+    Seus dados ficam salvos neste navegador e, se você quiser, num arquivo no seu Google Drive ou OneDrive. Ninguém mais tem acesso a eles.
+  </footer>
+
+  <div id="modal" class="modal" hidden></div>
+  <div id="tooltip" class="tooltip" role="tooltip" hidden></div>
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

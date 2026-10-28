@@ -1,0 +1,14 @@
+{
+  "name": "Minha Carteira",
+  "short_name": "Carteira",
+  "description": "Organize e analise seus investimentos: ações, FIIs, ETFs e renda fixa.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f9f9f7",
+  "theme_color": "#065f46",
+  "lang": "pt-BR",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
